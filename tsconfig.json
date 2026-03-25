@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2018",
+    "module": "commonjs",
+    "lib": [
+      "es6",
+      "dom"
+    ],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "experimentalDecorators": true, /* OBLIGATORIO PARA INVERSIFY */
+    "emitDecoratorMetadata": true, /* OBLIGATORIO PARA INVERSIFY */
+    "skipLibCheck": true
+  },
+  "exclude": [
+    "node_modules",
+    "tests"
+  ],
+  "include": [
+    "src/**/*"
+  ]
+}

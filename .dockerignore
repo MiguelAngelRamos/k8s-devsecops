@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.gitignore
+.env
+coverage
+Dockerfile
+.dockerignore
+k8s/
+README.md
+task.md
+implementation_plan.md
+tests/
+jest.config.js
