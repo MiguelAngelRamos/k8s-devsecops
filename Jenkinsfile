@@ -24,10 +24,17 @@ pipeline {
             steps {
                 script {
                     echo "Instalando dependencias y ejecutando tests..."
+                    // npm ci instala las dependencias exactas del package-lock.json (reproducible y limpio)
                     sh 'npm ci'
                     sh 'npm run test:ci'
 
-                    echo "Analizando vulnerabilidades en dependencias (SCA — npm audit)..."
+                    echo "Verificando vulnerabilidades en dependencias (SCA — npm audit)..."
+                    // El pipeline SOLO VERIFICA — no modifica package.json ni package-lock.json.
+                    // Si hay vulnerabilidades high/critical, el pipeline falla intencionalmente
+                    // para que el desarrollador ejecute 'npm audit fix' localmente, commitee
+                    // los cambios en package.json y package-lock.json, y haga push al repositorio.
+                    // Esto garantiza que el código fuente en el repo siempre refleje
+                    // el estado real de las dependencias (principio de infraestructura como código).
                     sh 'npm audit --audit-level=high'
                 }
             }
