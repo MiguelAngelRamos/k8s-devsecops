@@ -71,7 +71,7 @@ pipeline {
                     sh """
                         docker run --rm \
                             -v /var/run/docker.sock:/var/run/docker.sock \
-                            aquasec/trivy image \
+                            aquasec/trivy:0.69.3 image \
                             --exit-code 1 \
                             --severity CRITICAL \
                             --no-progress \
