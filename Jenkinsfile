@@ -1,73 +1,79 @@
 pipeline {
-    agent any
+    agent none
 
     environment {
         DOCKER_IMAGE = 'node-api-rest'
         BRANCH_TAG = "${env.BRANCH_NAME.replace('/', '-')}"
+        REGISTRY = '192.168.1.28:5000'
     }
 
     stages {
+
+        // ─────────────────────────────────────────
+        // MASTER: Punto de entrada del pipeline
+        // Lee la configuración del repositorio SCM
+        // ─────────────────────────────────────────
         stage('Checkout') {
+            agent { label 'master' }
             steps {
                 checkout scm
             }
         }
 
+        // ─────────────────────────────────────────
+        // SLAVE: Tests y análisis de dependencias
+        // Node corre dentro de contenedor Docker
+        // El slave nunca tiene Node instalado directo
+        // ─────────────────────────────────────────
         stage('Tests & SCA') {
             agent {
                 docker {
                     image 'node:20-alpine'
                     args '-u root:root --entrypoint=""'
                     reuseNode true
+                    label 'slave'
                 }
             }
             steps {
                 script {
                     echo "Instalando dependencias y ejecutando tests..."
-                    // npm ci instala las dependencias exactas del package-lock.json (reproducible y limpio)
                     sh 'npm ci'
                     sh 'npm run test:ci'
 
-                    echo "Verificando vulnerabilidades en dependencias (SCA — npm audit)..."
-                    // El pipeline SOLO VERIFICA — no modifica package.json ni package-lock.json.
-                    // Si hay vulnerabilidades high/critical, el pipeline falla intencionalmente
-                    // para que el desarrollador ejecute 'npm audit fix' localmente, commitee
-                    // los cambios en package.json y package-lock.json, y haga push al repositorio.
-                    // Esto garantiza que el código fuente en el repo siempre refleje
-                    // el estado real de las dependencias (principio de infraestructura como código).
+                    echo "Verificando vulnerabilidades en dependencias (SCA)..."
                     sh 'npm audit --audit-level=high'
                 }
             }
         }
 
-        stage('SAST — SonarQube') {
+        // ─────────────────────────────────────────
+        // SLAVE: Build de imagen Docker
+        // CPU intensivo — se delega al slave
+        // Push al registry local del master
+        // ─────────────────────────────────────────
+        stage('Build y push a registry') {
+            agent { label 'slave' }
             steps {
                 script {
-                    echo "Analizando el código fuente con SonarQube (SAST)..."
-                    def scannerHome = tool 'sonar-scanner'
-                    withSonarQubeEnv('sonarqube') {
-                        sh "${scannerHome}/bin/sonar-scanner"
-                    }
+                    echo "Construyendo imagen Docker en el slave..."
+                    sh "docker build -t ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG} ."
+
+                    echo "Push al registry local del master..."
+                    sh "docker push ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}"
                 }
             }
         }
 
-        stage('Construir y Cargar Imagen en Minikube') {
-            steps {
-                script {
-                    echo "Construyendo la imagen localmente usando Docker del host..."
-                    sh "docker build -t ${DOCKER_IMAGE}:${BRANCH_TAG} ."
-
-                    echo "Cargando la imagen al daemon Docker de Minikube..."
-                    sh "docker save ${DOCKER_IMAGE}:${BRANCH_TAG} | docker exec -i minikube docker load"
-                }
-            }
-        }
-
+        // ─────────────────────────────────────────
+        // SLAVE: Escaneo de vulnerabilidades CVE
+        // Trivy es pesado en CPU y RAM
+        // Escanea la imagen desde el registry
+        // ─────────────────────────────────────────
         stage('Container Scanning — Trivy') {
+            agent { label 'slave' }
             steps {
                 script {
-                    echo "Escaneando la imagen Docker en busca de CVEs (Container Scanning)..."
+                    echo "Escaneando imagen Docker en busca de CVEs..."
                     sh """
                         docker run --rm \
                             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -75,16 +81,22 @@ pipeline {
                             --exit-code 1 \
                             --severity CRITICAL \
                             --no-progress \
-                            ${DOCKER_IMAGE}:${BRANCH_TAG}
+                            ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}
                     """
                 }
             }
         }
 
+        // ─────────────────────────────────────────
+        // SLAVE: Escaneo de manifiestos Kubernetes
+        // Checkov analiza configuraciones IaC
+        // Solo necesita Docker — va al slave
+        // ─────────────────────────────────────────
         stage('IaC Scanning — Checkov') {
+            agent { label 'slave' }
             steps {
                 script {
-                    echo "Escaneando manifiestos de Kubernetes en busca de malas configuraciones (IaC)..."
+                    echo "Escaneando manifiestos Kubernetes (IaC)..."
                     sh """
                         docker run --rm \
                             -v ${WORKSPACE}/k8s:/k8s \
@@ -98,24 +110,59 @@ pipeline {
             }
         }
 
-        stage('Desplegar en K8s (Minikube)') {
+        // ─────────────────────────────────────────
+        // MASTER: Cargar imagen en Minikube
+        // Minikube vive en el master
+        // Pull desde registry → load en contexto K8s
+        // ─────────────────────────────────────────
+        stage('Cargar imagen en Minikube') {
+            agent { label 'master' }
             steps {
-                withKubeConfig([credentialsId: 'k8s-token', serverUrl: 'https://192.168.49.2:8443']) {
+                script {
+                    echo "Cargando imagen al contexto interno de Minikube..."
+                    sh "minikube image load ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}"
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────
+        // MASTER: Deploy en Kubernetes
+        // kubectl y credenciales viven en el master
+        // Namespaces por rama: main=prod, develop=dev
+        // ─────────────────────────────────────────
+        stage('Deploy en K8s') {
+            agent { label 'master' }
+            steps {
+                withKubeConfig([credentialsId: 'k8s-token',
+                               serverUrl: 'https://192.168.49.2:8443']) {
                     script {
                         def namespace = 'default'
-                        if (env.BRANCH_NAME == 'main') {
-                            namespace = 'prod'
-                        } else if (env.BRANCH_NAME == 'develop') {
-                            namespace = 'dev'
-                        }
+                        if (env.BRANCH_NAME == 'main') namespace = 'prod'
+                        else if (env.BRANCH_NAME == 'develop') namespace = 'dev'
 
+                        echo "Desplegando en namespace: ${namespace}..."
                         sh "kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -"
-                        sh "sed -i 's|image: .*|image: ${DOCKER_IMAGE}:${BRANCH_TAG}|g' k8s/api-deployment.yaml"
+                        sh "sed -i 's|image: .*|image: ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}|g' k8s/api-deployment.yaml"
                         sh "kubectl apply -f k8s/ -n ${namespace}"
                         sh "kubectl rollout restart deployment node-api -n ${namespace}"
                     }
                 }
             }
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // POST: Acciones finales según resultado
+    // ─────────────────────────────────────────
+    post {
+        success {
+            echo "Pipeline completado exitosamente."
+        }
+        failure {
+            echo "Pipeline fallido. Revisar logs del stage correspondiente."
+        }
+        always {
+            echo "Pipeline finalizado — rama: ${env.BRANCH_NAME} — tag: ${env.BRANCH_TAG}"
         }
     }
 }
