@@ -119,8 +119,9 @@ pipeline {
             agent { label 'master' }
             steps {
                 script {
-                    echo "Cargando imagen al contexto interno de Minikube..."
-                    sh "minikube image load ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}"
+                    withEnv(['MINIKUBE_HOME=/var/lib/jenkins/.minikube']) {
+                        sh "minikube image load ${REGISTRY}/${DOCKER_IMAGE}:${BRANCH_TAG}"
+                    }
                 }
             }
         }
